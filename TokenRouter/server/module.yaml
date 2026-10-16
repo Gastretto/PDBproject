@@ -1,0 +1,12 @@
+product: jvm/app
+
+dependencies:
+  - //core
+  - $ktor.server.core
+  - $ktor.server.netty
+  - $libs.logback.classic
+
+settings:
+  ktor: enabled
+  jvm:
+    mainClass: com.marlin.tokenrouter.server.ApplicationKt

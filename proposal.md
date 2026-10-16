@@ -19,6 +19,8 @@ Kotlin server app which will route (fake) llm api calls to their destined url an
 
 Kotlin server writes log -> InfluxDB -> 5-10 minutes -> job aggregates data -> PostgreSQL -> data is cached to Redis or read replicas of PostgreSQL are created.
 
+![infra](excalidraw-infra.png)
+
 
 
 
