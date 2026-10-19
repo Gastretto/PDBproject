@@ -1,4 +1,4 @@
-package com.marlin.tokenrouter.server.db
+package com.marlin.tokenrouter.server.postgres
 
 import org.jetbrains.exposed.sql.Table
 

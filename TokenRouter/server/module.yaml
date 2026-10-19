@@ -12,6 +12,7 @@ dependencies:
   - $libs.hikaricp
   - $libs.flyway.core
   - $libs.flyway.database.postgresql
+  - $libs.influxdb.client.java
 
 settings:
   ktor: enabled

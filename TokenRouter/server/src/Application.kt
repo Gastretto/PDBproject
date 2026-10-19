@@ -1,6 +1,7 @@
 package com.marlin.tokenrouter.server
 
-import com.marlin.tokenrouter.server.db.Database
+import com.marlin.tokenrouter.server.postgres.Database
+import com.marlin.tokenrouter.server.influx.Influx
 import com.marlin.tokenrouter.server.routes.apiRoutes
 import com.marlin.tokenrouter.server.routes.demoRoutes
 import com.marlin.tokenrouter.sayHello
@@ -18,6 +19,11 @@ fun main() {
 
 fun Application.module() {
     Database.init()
+    if (Influx.ping()) {
+        println("[influx] connected to ${System.getenv("INFLUX_URL") ?: "http://localhost:8086"}")
+    } else {
+        println("[influx] WARNING: not reachable — /demo/influx/* endpoints will return 502")
+    }
 
     routing {
         get("/") {

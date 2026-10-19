@@ -1,7 +1,7 @@
 package com.marlin.tokenrouter.server.routes
 
-import com.marlin.tokenrouter.server.db.allCompanies
-import com.marlin.tokenrouter.server.db.findCompany
+import com.marlin.tokenrouter.server.postgres.allCompanies
+import com.marlin.tokenrouter.server.postgres.findCompany
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call

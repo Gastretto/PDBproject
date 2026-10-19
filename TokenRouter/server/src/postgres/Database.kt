@@ -1,4 +1,4 @@
-package com.marlin.tokenrouter.server.db
+package com.marlin.tokenrouter.server.postgres
 
 import com.marlin.tokenrouter.model.ApiKey
 import com.zaxxer.hikari.HikariConfig
