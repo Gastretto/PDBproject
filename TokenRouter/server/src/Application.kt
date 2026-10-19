@@ -1,6 +1,7 @@
 package com.marlin.tokenrouter.server
 
 import com.marlin.tokenrouter.server.db.Database
+import com.marlin.tokenrouter.server.routes.apiRoutes
 import com.marlin.tokenrouter.server.routes.demoRoutes
 import com.marlin.tokenrouter.sayHello
 import io.ktor.server.application.Application
@@ -23,5 +24,6 @@ fun Application.module() {
             call.respondText(sayHello("Ktor"))
         }
         demoRoutes()
+        apiRoutes()
     }
 }

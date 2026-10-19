@@ -7,6 +7,7 @@ exposed = "0.60.0"
 postgresql = "42.7.7"
 hikaricp = "6.3.1"
 flyway = "11.9.1"
+ktor = "3.4.1"
 
 [libraries]
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
@@ -24,4 +25,7 @@ flyway-core = { module = "org.flywaydb:flyway-core", version.ref = "flyway" }
 flyway-database-postgresql = { module = "org.flywaydb:flyway-database-postgresql", version.ref = "flyway" }
 
 # influx db
+
+# ktor engines not present in the built-in catalog
+ktor-client-js = { module = "io.ktor:ktor-client-js", version.ref = "ktor" }
 

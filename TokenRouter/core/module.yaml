@@ -4,7 +4,24 @@ product:
 
 dependencies:
   - $kotlin.serialization.json
+  - $ktor.client.core
+
+dependencies@jvm:
+  - $ktor.client.cio
+
+dependencies@android:
+  - $ktor.client.okhttp
+
+dependencies@iosArm64:
+  - $ktor.client.darwin
+
+dependencies@iosSimulatorArm64:
+  - $ktor.client.darwin
+
+dependencies@wasmJs:
+  - $libs.ktor.client.js
 
 settings:
+  ktor: enabled
   kotlin:
     serialization: enabled
