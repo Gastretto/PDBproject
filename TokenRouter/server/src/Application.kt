@@ -1,5 +1,7 @@
 package com.marlin.tokenrouter.server
 
+import com.marlin.tokenrouter.server.db.Database
+import com.marlin.tokenrouter.server.routes.demoRoutes
 import com.marlin.tokenrouter.sayHello
 import io.ktor.server.application.Application
 import io.ktor.server.engine.embeddedServer
@@ -14,9 +16,12 @@ fun main() {
 }
 
 fun Application.module() {
+    Database.init()
+
     routing {
         get("/") {
             call.respondText(sayHello("Ktor"))
         }
+        demoRoutes()
     }
 }

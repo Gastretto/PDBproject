@@ -5,8 +5,17 @@ dependencies:
   - $ktor.server.core
   - $ktor.server.netty
   - $libs.logback.classic
+  - $kotlin.serialization.json
+  - $libs.exposed.core
+  - $libs.exposed.jdbc
+  - $libs.postgresql
+  - $libs.hikaricp
+  - $libs.flyway.core
+  - $libs.flyway.database.postgresql
 
 settings:
   ktor: enabled
+  kotlin:
+    serialization: enabled
   jvm:
     mainClass: com.marlin.tokenrouter.server.ApplicationKt
