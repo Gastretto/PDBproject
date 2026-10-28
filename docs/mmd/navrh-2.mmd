@@ -1,0 +1,3 @@
+flowchart LR
+  R["usage.token_usage<br/>raw eventy"] -->|"task 1m, range -5m"| S["usage_aggregation.token_usage_1m<br/>minutové snapshoty"]
+  S -->|"sync 1m, overlap 5m"| P[("PostgreSQL<br/>usage_rollup")]

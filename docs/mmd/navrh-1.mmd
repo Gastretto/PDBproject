@@ -1,0 +1,52 @@
+%%{init: {"er": {"layoutDirection": "TB", "minEntityWidth": 120, "minEntityHeight": 60, "entityPadding": 12}}}%%
+erDiagram
+  companies ||--o{ users : "má"
+  companies ||--o{ api_tokens : "vydává"
+  users ||--o{ api_tokens : "vlastní"
+  companies ||--o{ usage_rollup : "spotřebovává"
+  api_tokens ||--o{ usage_rollup : "generuje"
+
+  companies {
+    bigint id PK
+    varchar name
+    varchar prefix UK
+    numeric credit_limit
+    numeric credit_spend
+    numeric cost_per_token
+    boolean has_credits
+    timestamp created_at
+    timestamp updated_at
+  }
+  users {
+    bigint id PK
+    bigint company_id FK
+    varchar login UK
+    varchar name
+    text pwd_hash
+    timestamp created_at
+    timestamp updated_at
+  }
+  api_tokens {
+    bigint id PK
+    bigint company_id FK
+    bigint user_id FK
+    char token_hash UK
+    varchar token_prefix
+    timestamp revoked_at
+    timestamp created_at
+  }
+  usage_rollup {
+    bigint company_id PK,FK
+    bigint api_token_id PK,FK
+    varchar provider PK
+    varchar model PK
+    timestamp window_start PK
+    bigint input_tokens
+    bigint output_tokens
+    bigint total_tokens
+  }
+  aggregation_checkpoint {
+    smallint id PK
+    timestamp last_window_start
+    timestamp updated_at
+  }

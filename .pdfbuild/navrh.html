@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="cs" xml:lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Návrh - TokenRouter</title>
+  <style>
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="file:///Users/marcelmravec/Desktop/fit_vut_ing/3rdSemester/PDB/project/.pdfbuild/style.css" />
+</head>
+<body>
+<h1 class="title" id="návrh---tokenrouter">Návrh - TokenRouter</h1>
+<p>Token Router je middle proxy mezi klientskými aplikacemi a LLM
+providery. Řeší spotřebu tokenů, blokování po vyčerpání limitu, CRUD
+uživatelů a API tokenů a read-only dashboard se statistikami.</p>
+<p>Rozsah:</p>
+<ul>
+<li>proxy pro OpenAI a Anthropic protokol,</li>
+<li>billable inference routes a non-billable routes
+(<code>/v1/models</code>, count tokens),</li>
+<li>sledování spotřeby tokenů a limitu po minutách,</li>
+<li>blokování requestů po vyčerpání limitu,</li>
+<li>CRUD uživatelů a virtuálních API tokenů,</li>
+<li>dashboard read-only nad agregovanými daty,</li>
+<li>CQRS: InfluxDB jako write model, PostgreSQL jako read model a
+control plane.</li>
+</ul>
+<h1 id="architecture">Architecture</h1>
+<p><img
+src="/Users/marcelmravec/Desktop/fit_vut_ing/3rdSemester/PDB/project/Architecture.png"
+alt="Architektura" /></p>
+<h2 id="topologie">Topologie</h2>
+<!-- mmd:navrh-0 -->
+
+<p><img
+src="/Users/marcelmravec/Desktop/fit_vut_ing/3rdSemester/PDB/project/.pdfbuild/navrh-0.png"
+alt="Navrh 0" /></p>
+<h2 id="volba-databází">Volba databází</h2>
+<p>PostgreSQL:</p>
+<ul>
+<li>ACID pro limity, uživatele a tokeny,</li>
+<li>foreign keys, unique constraints, indexy,</li>
+<li><code>LISTEN/NOTIFY</code> pro pub/sub mezi DB a proxy,</li>
+<li>read model pro dashboard.</li>
+</ul>
+<p>InfluxDB:</p>
+<ul>
+<li>vysoký počet timestampovaných append-only zápisů,</li>
+<li>tagy indexované, fieldy sčitatelné,</li>
+<li>retention a Flux agregace,</li>
+</ul>
+<h2 id="tok-dat">Tok dat</h2>
+<pre class="text"><code>Proxy request
+  -&gt; InfluxUsageWriter.write(event)
+  -&gt; InfluxDB usage.token_usage
+  -&gt; AggregationTask (1 min)
+  -&gt; InfluxDB usage_aggregation.token_usage_1m
+  -&gt; UsageSyncJob (1 min)
+  -&gt; PostgreSQL usage_rollup + companies
+  -&gt; Dashboard / Admin UI</code></pre>
+<p>InfluxDB je write model a nikdy se z něj nečte na kritické cestě
+requestu. Dashboard čte pouze PostgreSQL. Agregační job běží v Kotlin
+serveru, protože zapisuje do PostgreSQL. InfluxDB tasky dělají pouze
+agregaci v rámci InfluxDB.</p>
+<h1 id="cqrs">CQRS</h1>
+<h2 id="hranice-systémů">Hranice systémů</h2>
+<table>
+<thead>
+<tr>
+<th>Část</th>
+<th>Úložiště</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>usage.token_usage</code></td>
+<td>InfluxDB</td>
+<td>zdroj pravdy o usage, append-only eventy</td>
+</tr>
+<tr>
+<td><code>usage_aggregation.token_usage_1m</code></td>
+<td>InfluxDB</td>
+<td>minutové snapshoty</td>
+</tr>
+<tr>
+<td><code>usage_rollup</code></td>
+<td>PostgreSQL</td>
+<td>read model pro dashboard</td>
+</tr>
+<tr>
+<td><code>companies</code></td>
+<td>PostgreSQL</td>
+<td>control plane + denormalizovaný credit stav</td>
+</tr>
+<tr>
+<td><code>users</code>, <code>api_tokens</code></td>
+<td>PostgreSQL</td>
+<td>control plane</td>
+</tr>
+<tr>
+<td><code>aggregation_checkpoint</code></td>
+<td>PostgreSQL</td>
+<td>stav sync jobu</td>
+</tr>
+</tbody>
+</table>
+<p>Zdroje pravdy:</p>
+<ul>
+<li><strong>Usage</strong> = InfluxDB. Při rozporu s
+<code>usage_rollup</code> je správně InfluxDB a rollup se doplní
+backfillem.</li>
+<li><strong>Identita, limity, tokeny</strong> = PostgreSQL. InfluxDB
+obsahuje jen jejich ID.</li>
+</ul>
+<h2 id="command-side">Command side</h2>
+<h3 id="billable-request">Billable request</h3>
+<ol type="1">
+<li><code>ApiTokenResolver</code> ověří token.</li>
+<li><code>RequestEstimator</code> odhadne input tokeny.</li>
+<li><code>CreditGuard.authorize()</code> zkontroluje
+<code>SpendLedger</code> a rezervuje limit.</li>
+<li><code>UpstreamClient</code> forwarduje request na providera.</li>
+<li><code>UsageExtractor</code> vytvoří <code>UsageEvent</code>.</li>
+<li><code>SpendLedger.settle()</code> uvolní rezervaci a přičte
+skutečnou spotřebu.</li>
+<li><code>InfluxUsageWriter.write(event)</code> zapíše bod do
+<code>usage.token_usage</code>.</li>
+</ol>
+<p>Vlastnosti:</p>
+<ul>
+<li>Zápis do InfluxDB je synchronní; mezi proxy a InfluxDB není buffer
+ani queue.</li>
+<li>Event je at-least-once; idempotence je řešena až v read modelu (PK
+rollupu).</li>
+<li>Selhání zápisu se loguje a zvýší metriku; request už je
+dokončený.</li>
+<li><code>user_id</code> se do InfluxDB neposílá; dohledá se přes
+<code>api_tokens.user_id</code>.</li>
+</ul>
+<h3 id="control-plane-commandy">Control plane commandy</h3>
+<p>CRUD uživatelů a tokenů zapisuje přímo do PostgreSQL (transakčně) a
+po commitu publikuje <code>api_token_events</code>:</p>
+<ul>
+<li><code>ApiTokenEventSubscriber</code> invaliduje
+<code>ApiTokenCache</code>.</li>
+<li>Revokace tokenu nastaví <code>revoked_at = now()</code>.</li>
+<li>Tokeny se nikdy nemažou tvrdě; <code>api_tokens.id</code> zůstává
+stabilní pro InfluxDB.</li>
+</ul>
+<h2 id="aggregace-ve-write-modelu">Aggregace ve write modelu</h2>
+<p>Proxy zapisuje raw eventy; InfluxDB task z nich každou minutu dělá
+snapshot:</p>
+<pre class="flux"><code>option task = {
+    name: &quot;aggregate_usage_1m&quot;,
+    every: 1m,
+    offset: 10s,
+}
+
+from(bucket: &quot;usage&quot;)
+    |&gt; range(start: -5m)
+    |&gt; filter(fn: (r) =&gt; r._measurement == &quot;token_usage&quot;)
+    |&gt; filter(fn: (r) =&gt;
+        r._field == &quot;input_tokens&quot; or
+        r._field == &quot;output_tokens&quot; or
+        r._field == &quot;total_tokens&quot;
+    )
+    |&gt; aggregateWindow(
+        every: 1m,
+        fn: sum,
+        createEmpty: false,
+        timeSrc: &quot;_start&quot;,
+    )
+    |&gt; to(
+        bucket: &quot;usage_aggregation&quot;,
+        org: &quot;tokenrouter&quot;,
+        measurement: &quot;token_usage_1m&quot;,
+    )</code></pre>
+<ul>
+<li><code>range(start: -5m)</code> je překryv pro pozdní data a krátký
+výpadek tasku.</li>
+<li><code>timeSrc: "_start"</code> nastaví <code>_time</code> na začátek
+okna.</li>
+<li>Opakovaný běh přepíše stejný bod → idempotence.</li>
+<li>Task umí zapisovat jen do InfluxDB, ne do PostgreSQL.</li>
+</ul>
+<h2 id="read-side">Read side</h2>
+<h3 id="usage_rollup"><code>usage_rollup</code></h3>
+<p>Minutový read model. Upsert podle PK
+<code>(company_id, api_token_id, provider, model, window_start)</code>
+zaručuje, že opakovaný import nevytvoří duplicity.</p>
+<pre class="sql"><code>INSERT INTO usage_rollup
+    (company_id, api_token_id, provider, model, window_start,
+     input_tokens, output_tokens, total_tokens)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (company_id, api_token_id, provider, model, window_start)
+DO UPDATE SET
+    input_tokens  = EXCLUDED.input_tokens,
+    output_tokens = EXCLUDED.output_tokens,
+    total_tokens  = EXCLUDED.total_tokens;</code></pre>
+<h3 id="checkpoint">Checkpoint</h3>
+<p><code>aggregation_checkpoint</code> drží
+<code>last_window_start</code> – poslední importované okno, aby se po
+výpadku vykryly failnuté joby. Job vždy čte s překryvem
+<code>OVERLAP</code>.</p>
+<h3 id="usagesyncjob"><code>UsageSyncJob</code></h3>
+<p>Běží každou minutu, v jedné instanci (advisory lock), a je
+idempotentní.</p>
+<pre class="kotlin"><code>class UsageSyncJob(
+    private val influx: InfluxUsageReader,
+    private val rollup: UsageRollupRepository,
+    private val checkpoint: UsageCheckpointRepository,
+    private val credits: CompanyCreditRepository,
+) {
+    suspend fun runOnce() {
+        if (!checkpoint.tryAdvisoryLock()) return
+        try {
+            val state = checkpoint.load()
+            val from = state.lastWindowStart?.minus(OVERLAP)
+                ?: Instant.now().minus(OVERLAP).minus(WINDOW)
+
+            val rows = influx.readSnapshots(from)       // token_usage_1m
+            if (rows.isEmpty()) {
+                checkpoint.touch()                      // updated_at = now()
+                return
+            }
+
+            transaction {
+                rollup.upsertAll(rows)                  // idempotentní
+                val companyIds = rows.map { it.companyId }.distinct()
+                credits.recompute(companyIds)           // credit_spend + has_credits
+                checkpoint.save(
+                    lastWindowStart = rows.maxOf { it.windowStart },
+                )
+            }
+            credits.publishEvents(companyIds)           // pg_notify credit_events
+        } finally {
+            checkpoint.releaseAdvisoryLock()
+        }
+    }
+}</code></pre>
+<h3 id="přepočet-kreditu">Přepočet kreditu</h3>
+<p>Po upsertu se pro dotčené společnosti přepočítá spotřeba
+absolutně:</p>
+<pre class="sql"><code>UPDATE companies c
+SET credit_spend = s.total_tokens * c.cost_per_token,
+    has_credits  = (s.total_tokens * c.cost_per_token) &lt; c.credit_limit,
+    updated_at   = now()
+FROM (
+    SELECT company_id, SUM(total_tokens) AS total_tokens
+    FROM usage_rollup
+    WHERE company_id = ANY (:companyIds)
+    GROUP BY company_id
+) s
+WHERE c.id = s.company_id;</code></pre>
+<ul>
+<li>Absolutní přepočet řeší pozdní data i změnu
+<code>cost_per_token</code>.</li>
+<li><code>has_credits</code> se mění oběma směry (vyčerpání i navýšení
+limitu).</li>
+<li>Po změně se publikuje <code>credit_events</code> do proxy.</li>
+</ul>
+<h3 id="query-side">Query side</h3>
+<p>Dashboard čte pouze PostgreSQL:</p>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Čte</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/companies</code></td>
+<td><code>companies</code></td>
+</tr>
+<tr>
+<td><code>GET /api/companies/{id}</code></td>
+<td><code>companies</code>, <code>users</code>, <code>api_tokens</code>
+(maskovaně)</td>
+</tr>
+<tr>
+<td><code>GET /api/usage?companyId=&amp;from=&amp;to=&amp;groupBy=</code></td>
+<td><code>usage_rollup</code></td>
+</tr>
+<tr>
+<td><code>GET /api/limit-status?companyId=</code></td>
+<td><code>companies</code></td>
+</tr>
+</tbody>
+</table>
+<p>Query side je read-only a neprovádí žádné zápisy.</p>
+<h2 id="konzistence-a-čerstvost">Konzistence a čerstvost</h2>
+<table>
+<thead>
+<tr>
+<th>Data</th>
+<th>Zpoždění</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>usage.token_usage</code></td>
+<td>0 (synchronní zápis)</td>
+</tr>
+<tr>
+<td><code>token_usage_1m</code></td>
+<td>do 1 min + <code>FLUX_OFFSET</code></td>
+</tr>
+<tr>
+<td><code>usage_rollup</code></td>
+<td>do <code>SYNC_INTERVAL + LATE_GRACE</code> (typicky 1–2 min)</td>
+</tr>
+<tr>
+<td><code>companies.has_credits</code></td>
+<td>stejné jako <code>usage_rollup</code></td>
+</tr>
+<tr>
+<td>Proxy rozhodnutí o 402</td>
+<td>okamžité díky <code>SpendLedger</code></td>
+</tr>
+</tbody>
+</table>
+<p>Model je eventually consistent s garantovanou idempotencí: snapshoty
+i rollup přepisují stejná okna, takže libovolný počet opakování dá
+stejný stav. Read model lze kdykoli přestavět backfillem z InfluxDB.</p>
+<h2 id="credit-enforcement">Credit enforcement</h2>
+<p>Dvě vrstvy:</p>
+<ol type="1">
+<li><strong>Lokální <code>SpendLedger</code></strong> v proxy – brání
+nekontrolovanému overspendu mezi synchronizacemi.</li>
+<li><strong>PostgreSQL <code>has_credits</code></strong> – autoritativní
+stav pro dashboard a korekci, aktualizovaný každou minutu.</li>
+</ol>
+<p>Proxy používá <code>has_credits</code> z cache napájené
+<code>credit_events</code>. <code>NOTIFY</code> není durable → při
+startu a reconnectu se dělá plný resync.</p>
+<h2 id="failure-modes">Failure modes</h2>
+<table>
+<thead>
+<tr>
+<th>Situace</th>
+<th>Chování</th>
+<th>Dopad</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>InfluxDB write selže 3x</td>
+<td>log + metrika, request pokračuje</td>
+<td>usage event se ztratí</td>
+</tr>
+<tr>
+<td>Flux task selže</td>
+<td>další běh pokryje <code>-5m</code></td>
+<td>snapshot se zpozdí</td>
+</tr>
+<tr>
+<td>Sync job selže</td>
+<td>checkpoint se neposune, další běh opakuje</td>
+<td>beze ztráty, jen zpoždění</td>
+</tr>
+<tr>
+<td><code>NOTIFY</code> se ztratí</td>
+<td>resync při startu/reconnectu</td>
+<td>dočasně starý credit stav</td>
+</tr>
+<tr>
+<td>Pozdní event &lt; <code>OVERLAP</code></td>
+<td>další běh okno přepíše</td>
+<td>správná data</td>
+</tr>
+<tr>
+<td>Pozdní event &gt; <code>OVERLAP</code></td>
+<td>mimo automatickou opravu</td>
+<td>manuální backfill</td>
+</tr>
+<tr>
+<td>InfluxDB unavailable při dotazu</td>
+<td>dashboard čte PostgreSQL</td>
+<td>bez dopadu na čtení</td>
+</tr>
+</tbody>
+</table>
+<h1 id="tables">Tables</h1>
+<p>PostgreSQL je autoritativní schéma verzované Flyway migracemi;
+InfluxDB je evoluční snapshot bez migrací.</p>
+<h2 id="postgresql">PostgreSQL</h2>
+<h3 id="companies"><code>companies</code></h3>
+<pre class="sql"><code>CREATE TABLE companies (
+    id             BIGSERIAL PRIMARY KEY,
+    name           VARCHAR(255)  NOT NULL,
+    prefix         VARCHAR(64)   NOT NULL UNIQUE,
+    credit_limit   NUMERIC(18,6) NOT NULL DEFAULT 0,
+    credit_spend   NUMERIC(18,6) NOT NULL DEFAULT 0,
+    cost_per_token NUMERIC(18,8) NOT NULL DEFAULT 0,
+    has_credits    BOOLEAN       NOT NULL DEFAULT TRUE,
+    created_at     timestamp     NOT NULL DEFAULT now(),
+    updated_at     timestamp     NOT NULL DEFAULT now(),
+    CONSTRAINT companies_credit_limit_non_negative CHECK (credit_limit &gt;= 0),
+    CONSTRAINT companies_credit_spend_non_negative CHECK (credit_spend &gt;= 0)
+);</code></pre>
+<table>
+<thead>
+<tr>
+<th>Sloupec</th>
+<th>Význam</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>prefix</code></td>
+<td>prefix virtuálních tokenů (<code>acme-…</code>), unikátní</td>
+</tr>
+<tr>
+<td><code>credit_limit</code></td>
+<td>limit v USD</td>
+</tr>
+<tr>
+<td><code>credit_spend</code></td>
+<td>spotřeba v USD, odvozená z <code>usage_rollup</code> sync jobem</td>
+</tr>
+<tr>
+<td><code>cost_per_token</code></td>
+<td>cena za 1 token v USD</td>
+</tr>
+<tr>
+<td><code>has_credits</code></td>
+<td><code>credit_spend &lt; credit_limit</code>; denormalizováno pro
+proxy</td>
+</tr>
+</tbody>
+</table>
+<p><code>credit_spend</code> a <code>has_credits</code> se needitují
+ručně; přepočítává je <code>UsageSyncJob</code>.
+<code>has_credits = FALSE</code> znamená <code>402</code> (lokální
+<code>SpendLedger</code> může zablokovat i dříve).</p>
+<h3 id="users"><code>users</code></h3>
+<pre class="sql"><code>CREATE TABLE users (
+    id         BIGSERIAL PRIMARY KEY,
+    company_id BIGINT       NOT NULL REFERENCES companies (id),
+    login      VARCHAR(255) NOT NULL UNIQUE,
+    name       VARCHAR(255) NOT NULL,
+    pwd_hash   TEXT         NOT NULL,
+    created_at timestamp    NOT NULL DEFAULT now(),
+    updated_at timestamp    NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_users_company ON users (company_id);</code></pre>
+<table>
+<thead>
+<tr>
+<th>Sloupec</th>
+<th>Význam</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>login</code></td>
+<td>unikátní přihlašovací jméno</td>
+</tr>
+<tr>
+<td><code>pwd_hash</code></td>
+<td>bcrypt hash hesla</td>
+</tr>
+</tbody>
+</table>
+<h3 id="api_tokens"><code>api_tokens</code></h3>
+<pre class="sql"><code>CREATE TABLE api_tokens (
+    id           BIGSERIAL PRIMARY KEY,
+    company_id   BIGINT      NOT NULL REFERENCES companies (id),
+    user_id      BIGINT      NOT NULL REFERENCES users (id),
+    token_hash   CHAR(64)    NOT NULL UNIQUE, -- SHA-256 hex
+    token_prefix VARCHAR(16) NOT NULL,        -- pro maskovaný výpis
+    revoked_at   timestamp   NULL,            -- NULL = aktivní
+    created_at   timestamp   NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_api_tokens_company ON api_tokens (company_id);
+CREATE INDEX idx_api_tokens_user ON api_tokens (user_id);</code></pre>
+<table>
+<thead>
+<tr>
+<th>Sloupec</th>
+<th>Význam</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>token_hash</code></td>
+<td>SHA-256 z celého tokenu; vyhledávací klíč při autentizaci</td>
+</tr>
+<tr>
+<td><code>token_prefix</code></td>
+<td>prvních 16 znaků tokenu (<code>acme-****9c2e</code>)</td>
+</tr>
+<tr>
+<td><code>revoked_at</code></td>
+<td><code>NULL</code> = aktivní</td>
+</tr>
+<tr>
+<td><code>user_id</code></td>
+<td>vlastník tokenu; per-user statistiky a revokace</td>
+</tr>
+</tbody>
+</table>
+<p>Plaintext token se vrací pouze jednou při vytvoření. Token se nikdy
+nemaže tvrdě, protože na <code>api_tokens.id</code> odkazuje
+<code>usage_rollup</code>.</p>
+<h3 id="usage_rollup-1"><code>usage_rollup</code></h3>
+<pre class="sql"><code>CREATE TABLE usage_rollup (
+    company_id    BIGINT      NOT NULL REFERENCES companies (id),
+    api_token_id  BIGINT      NOT NULL REFERENCES api_tokens (id),
+    provider      VARCHAR(32) NOT NULL,
+    model         VARCHAR(128) NOT NULL,
+    window_start  timestamp   NOT NULL,
+    input_tokens  BIGINT      NOT NULL,
+    output_tokens BIGINT      NOT NULL,
+    total_tokens  BIGINT      NOT NULL,
+    PRIMARY KEY (company_id, api_token_id, provider, model, window_start),
+    CONSTRAINT usage_rollup_total_matches
+        CHECK (total_tokens = input_tokens + output_tokens),
+    CONSTRAINT usage_rollup_tokens_non_negative
+        CHECK (input_tokens &gt;= 0 AND output_tokens &gt;= 0),
+    CONSTRAINT usage_rollup_minute_aligned
+        CHECK (date_trunc(&#39;minute&#39;, window_start) = window_start),
+    CONSTRAINT usage_rollup_provider_valid
+        CHECK (provider IN (&#39;OPENAI&#39;, &#39;ANTHROPIC&#39;, &#39;DEEPSEEK&#39;))
+);
+
+CREATE INDEX idx_usage_rollup_company_time
+    ON usage_rollup (company_id, window_start);
+CREATE INDEX idx_usage_rollup_token_time
+    ON usage_rollup (api_token_id, window_start);
+CREATE INDEX idx_usage_rollup_model_time
+    ON usage_rollup (model, window_start);</code></pre>
+<table>
+<thead>
+<tr>
+<th>Sloupec</th>
+<th>Význam</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>window_start</code></td>
+<td>začátek minutového okna, zarovnáno na minutu</td>
+</tr>
+<tr>
+<td><code>total_tokens</code></td>
+<td><code>input_tokens + output_tokens</code></td>
+</tr>
+<tr>
+<td>PK</td>
+<td>zaručuje idempotentní upsert</td>
+</tr>
+</tbody>
+</table>
+<h3 id="aggregation_checkpoint"><code>aggregation_checkpoint</code></h3>
+<pre class="sql"><code>CREATE TABLE aggregation_checkpoint (
+    id                SMALLINT  PRIMARY KEY DEFAULT 1,
+    last_window_start timestamp,             -- poslední okno, které job viděl
+    updated_at        timestamp NOT NULL DEFAULT now(),
+    CONSTRAINT aggregation_checkpoint_singleton CHECK (id = 1)
+);
+
+INSERT INTO aggregation_checkpoint (id) VALUES (1) ON CONFLICT DO NOTHING;</code></pre>
+<table>
+<thead>
+<tr>
+<th>Sloupec</th>
+<th>Význam</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>last_window_start</code></td>
+<td>maximum <code>window_start</code> z posledního úspěšného
+importu</td>
+</tr>
+<tr>
+<td><code>updated_at</code></td>
+<td>čas posledního úspěšného běhu</td>
+</tr>
+</tbody>
+</table>
+<h3 id="migrace">Migrace</h3>
+<p>Pomocí Flyway se budou řešit migrace.</p>
+<h2 id="influxdb">InfluxDB</h2>
+<p>Konfigurace: org <code>tokenrouter</code>, buckety <code>usage</code>
+a <code>usage_aggregation</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Bucket</th>
+<th>Measurement</th>
+<th>Účel</th>
+<th>Retence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>usage</code></td>
+<td><code>token_usage</code></td>
+<td>raw eventy, append-only</td>
+<td>30 dní</td>
+</tr>
+<tr>
+<td><code>usage_aggregation</code></td>
+<td><code>token_usage_1m</code></td>
+<td>minutové snapshoty pro sync</td>
+<td>90 dní</td>
+</tr>
+</tbody>
+</table>
+<h3 id="token_usage-raw"><code>token_usage</code> (raw)</h3>
+<table>
+<thead>
+<tr>
+<th>Prvek</th>
+<th>Název</th>
+<th>Význam</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>tag</td>
+<td><code>company_id</code></td>
+<td>společnost</td>
+</tr>
+<tr>
+<td>tag</td>
+<td><code>api_token_id</code></td>
+<td>token, ze kterého request přišel</td>
+</tr>
+<tr>
+<td>tag</td>
+<td><code>provider</code></td>
+<td><code>OPENAI</code>, <code>ANTHROPIC</code>,
+<code>DEEPSEEK</code></td>
+</tr>
+<tr>
+<td>tag</td>
+<td><code>model</code></td>
+<td>kanonický název modelu</td>
+</tr>
+<tr>
+<td>field</td>
+<td><code>input_tokens</code></td>
+<td>input/prompt tokeny (integer)</td>
+</tr>
+<tr>
+<td>field</td>
+<td><code>output_tokens</code></td>
+<td>output/completion tokeny (integer)</td>
+</tr>
+<tr>
+<td>field</td>
+<td><code>total_tokens</code></td>
+<td>součet (integer)</td>
+</tr>
+<tr>
+<td>time</td>
+<td><code>_time</code></td>
+<td>čas vzniku usage, ms</td>
+</tr>
+</tbody>
+</table>
+<p><code>user_id</code> není tag; dohledá se přes
+<code>api_tokens.user_id</code>.</p>
+<p>Line protocol:</p>
+<pre class="text"><code>token_usage,company_id=1,api_token_id=12,provider=OPENAI,model=gpt-4o-mini input_tokens=500i,output_tokens=300i,total_tokens=800i 1730000000000000000</code></pre>
+<p>Zápis z proxy:</p>
+<pre class="kotlin"><code>suspend fun writeUsage(event: UsageEvent) {
+    val point = Point
+        .measurement(&quot;token_usage&quot;)
+        .addTag(&quot;company_id&quot;, event.companyId.toString())
+        .addTag(&quot;api_token_id&quot;, event.apiTokenId.toString())
+        .addTag(&quot;provider&quot;, event.provider)
+        .addTag(&quot;model&quot;, event.model)
+        .addField(&quot;input_tokens&quot;, event.inputTokens)
+        .addField(&quot;output_tokens&quot;, event.outputTokens)
+        .addField(&quot;total_tokens&quot;, event.totalTokens)
+        .time(Instant.ofEpochMilli(event.timestampMs), WritePrecision.MS)
+
+    influx.writeApiBlocking.writePoint(point)
+}</code></pre>
+<h3 id="token_usage_1m-snapshot"><code>token_usage_1m</code>
+(snapshot)</h3>
+<p>Stejné tagy a fieldy jako raw; <code>_time</code> = začátek
+minutového okna. Body jsou idempotentní: stejný tag set +
+<code>_time</code> se přepíše.</p>
+<p>Flux task je v sekci CQRS. <code>range(start: -5m)</code> zajišťuje
+překryv, <code>timeSrc: "_start"</code> začátek okna a
+<code>createEmpty: false</code> negeneruje prázdné buckety.</p>
+<h3 id="pravidla-změny-nosql-schématu">Pravidla změny NoSQL
+schématu</h3>
+<ul>
+<li>Lze přidávat fieldy; čtenáři ignorují neznámé fieldy.</li>
+<li>Nelze měnit význam existujícího tagu ani typu fieldu.</li>
+<li>Změna tag setu = nový measurement + backfill.</li>
+<li><code>api_tokens.id</code> se nikdy nerecykluje.</li>
+<li>Retence nesmí zkrátit okno potřebné pro <code>LATE_GRACE</code> a
+backfill.</li>
+</ul>
+<h2 id="erd">ERD</h2>
+<!-- mmd:navrh-1 -->
+
+<p><img
+src="/Users/marcelmravec/Desktop/fit_vut_ing/3rdSemester/PDB/project/.pdfbuild/navrh-1.png"
+alt="Navrh 1" /></p>
+<p>InfluxDB konceptuálně:</p>
+<!-- mmd:navrh-2 -->
+
+<p><img
+src="/Users/marcelmravec/Desktop/fit_vut_ing/3rdSemester/PDB/project/.pdfbuild/navrh-2.png"
+class="wide" alt="Navrh 2" /></p>
+<h2 id="užitečné-dotazy">Užitečné dotazy</h2>
+<p>Spotřeba společnosti:</p>
+<pre class="sql"><code>SELECT SUM(total_tokens) AS total_tokens
+FROM usage_rollup
+WHERE company_id = :companyId;</code></pre>
+<p>Časová řada pro graf:</p>
+<pre class="sql"><code>SELECT window_start, SUM(total_tokens) AS total_tokens
+FROM usage_rollup
+WHERE company_id = :companyId
+  AND window_start &gt;= :from
+  AND window_start &lt; :to
+GROUP BY window_start
+ORDER BY window_start;</code></pre>
+<p>Rozpad podle tokenu:</p>
+<pre class="sql"><code>SELECT api_token_id, SUM(total_tokens) AS total_tokens
+FROM usage_rollup
+WHERE company_id = :companyId
+  AND window_start &gt;= :from
+GROUP BY api_token_id
+ORDER BY total_tokens DESC;</code></pre>
+<p>Stav limitu:</p>
+<pre class="sql"><code>SELECT id,
+       credit_limit,
+       credit_spend,
+       credit_limit - credit_spend AS remaining,
+       has_credits
+FROM companies
+WHERE id = :companyId;</code></pre>
+<h1 id="testování">Testování</h1>
+<p>Testování není běžné vývojové testování, ale <strong>validace
+architektury a simulace provozu</strong>. Cílem je ověřit, že CQRS tok,
+agregace, limity a UI drží pod zátěží, při souběhu a při výpadcích.</p>
+<h2 id="simulační-harness">Simulační harness</h2>
+<ul>
+<li><strong>Fake client</strong> generuje OpenAI/Anthropic requesty:
+100–500 souběžných klientů, konfigurovatelný rate, deterministické
+chování.</li>
+<li><strong>Fake upstream</strong> nahrazuje LLM a vrací pevné usage
+(např. <code>input=500</code>, <code>output=300</code>,
+<code>total=800</code>), takže očekávané součty jsou přesně známé.</li>
+<li><strong>Seed</strong> vytvoří společnosti, uživatele a tokeny s
+definovaným limitem.</li>
+<li><strong>Admin UI</strong> zobrazuje průběh: počet requestů, tokeny,
+spotřebu, <code>has_credits</code>, počet <code>402</code>, stav
+agregace. Vše, co simulace vyprodukuje, je viditelné v UI.</li>
+</ul>
+<h2 id="scénáře">Scénáře</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Scénář</th>
+<th>Zátěž</th>
+<th>Očekávaný výsledek</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>S1</td>
+<td>Baseline</td>
+<td>1 společnost, 10 uživatelů, 20 tokenů, 100 requestů</td>
+<td>všech 100 viditelných v UI, <code>total = 80 000</code> tokenů</td>
+</tr>
+<tr>
+<td>S2</td>
+<td>Souběh</td>
+<td>200 souběžných klientů, 2 min, ~1 req/s každý (≈24 000
+requestů)</td>
+<td>chybovost &lt; 1 %, usage zachycen, rollup bez duplicit</td>
+</tr>
+<tr>
+<td>S3</td>
+<td>Sustained load</td>
+<td>100 souběžných klientů, 30 min (≈180 000 requestů)</td>
+<td>lag agregace ≤ 2 min, proxy stabilní, UI konzistentní</td>
+</tr>
+<tr>
+<td>S4</td>
+<td>Limit a 402</td>
+<td>limit na přesně 1 000 requestů, poslat 1 200 při 100 souběžných</td>
+<td>~1 000× <code>200</code>, ~200× <code>402</code>, overspend ≤ jedno
+in-flight okno</td>
+</tr>
+<tr>
+<td>S5</td>
+<td>Burst</td>
+<td>500 souběžných klientů, 10 s (≈5 000 requestů)</td>
+<td>žádný pád, ztráta ≤ 1 %, InfluxDB write latency stabilní</td>
+</tr>
+<tr>
+<td>S6</td>
+<td>Výpadek Flux tasku</td>
+<td>100 req/s, task zastaven na 3 min</td>
+<td>po obnovení overlap dožene data, součty sedí</td>
+</tr>
+<tr>
+<td>S7</td>
+<td>Crash sync jobu</td>
+<td>5× kill během transakce, 100 req/s</td>
+<td>žádné duplicity, checkpoint se posune jen po commitu</td>
+</tr>
+<tr>
+<td>S8</td>
+<td>Výpadek InfluxDB</td>
+<td>60 s nedostupná, 100 req/s</td>
+<td>proxy běží dál, ztráta ≤ 6 000 eventů zalogována, UI ukáže
+rozdíl</td>
+</tr>
+<tr>
+<td>S9</td>
+<td>Ztracený NOTIFY</td>
+<td>změna limitu, restart proxy</td>
+<td>resync po startu načte správný <code>has_credits</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="co-se-vyhodnocuje">Co se vyhodnocuje</h2>
+<table>
+<thead>
+<tr>
+<th>Metrika</th>
+<th>Cíl</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Úspěšné requesty vs. zapsané usage</td>
+<td>100 % pro úspěšné requesty (mimo simulované výpadky)</td>
+</tr>
+<tr>
+<td>Rozdíl Influx vs. <code>usage_rollup</code></td>
+<td>0 tokenů po dokončení agregace</td>
+</tr>
+<tr>
+<td>Lag <code>usage_rollup</code></td>
+<td>≤ 2 min</td>
+</tr>
+<tr>
+<td>Přesnost <code>402</code></td>
+<td>žádný request nad limitem mimo in-flight okno</td>
+</tr>
+<tr>
+<td>Dostupnost proxy</td>
+<td>≥ 99 % během všech scénářů</td>
+</tr>
+<tr>
+<td>Viditelnost v Admin UI</td>
+<td>všechny scénáře mají odpovídající data v UI</td>
+</tr>
+</tbody>
+</table>
+</body>
+</html>

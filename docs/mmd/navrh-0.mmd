@@ -1,0 +1,24 @@
+%%{init: {"flowchart": {"nodeSpacing": 28, "rankSpacing": 34, "requireLayout": false}}}%%
+flowchart TD
+  C["Client SDK"] -->|"POST /v1/chat/completions<br/>POST /v1/messages"| PR["ProxyRoutes"]
+  PR --> PS["ProxyService"]
+  PS --> AR["ApiTokenResolver<br/>(cache + PG fallback)"]
+  PS --> CG["CreditGuard"]
+  CG --> SL["SpendLedger"]
+  PS --> UC["UpstreamClient"]
+  UC --> UE["UsageExtractor"]
+  UE -->|"settle"| SL
+  UE -->|"UsageEvent"| IW["InfluxUsageWriter"]
+  IW -->|"line protocol"| RAW[("InfluxDB<br/>usage.token_usage")]
+
+  RAW -->|"Flux task 1m"| SNAP[("InfluxDB<br/>usage_aggregation<br/>token_usage_1m")]
+  SNAP -->|"UsageSyncJob 1m"| SYNC["UsageSyncJob"]
+  SYNC -->|"upsert"| ROLL[("PostgreSQL<br/>usage_rollup")]
+  SYNC -->|"přepočet"| CO[("PostgreSQL<br/>companies")]
+  CO -.->|"pg_notify credit_events"| CS["CreditEventSubscriber"]
+  CS --> CG
+  CS --> SL
+
+  D["Dashboard /<br/>Admin UI"] -->|"GET /api/*"| QS["UsageQueryService"]
+  QS --> ROLL
+  QS --> CO

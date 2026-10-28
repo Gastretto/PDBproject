@@ -6,9 +6,9 @@ import kotlinx.serialization.Serializable
 data class Company(
     val id: Long,
     val name: String,
-    val prefix: String,
-    val tokenLimit: Long,
-    val tokensSpent: Long,
-    val validApiKeys: List<ApiKey> = emptyList(),
-    val validLogins: List<User> = emptyList(),
+    val credit_limit: Double,
+    val credit_spend: Double,
+    val cost_per_token:Double,
+    val hasCredits:Boolean, // used for fast access for the proxy
+    val validApiKeyIds: List<ApiKey> = emptyList(),
 )
