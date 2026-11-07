@@ -5,24 +5,12 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class UsageEvent(
     val companyId: Long,
-    val userId: Long,
-    val promptTokens: Int,
-    val completionTokens: Int,
+    val apiTokenId: Long,
+    val provider: String,
+    val model: String,
+    val inputTokens: Long,
+    val outputTokens: Long,
     val timestampMs: Long,
 ) {
-    val totalTokens: Int get() = promptTokens + completionTokens
+    val totalTokens: Long get() = inputTokens + outputTokens
 }
-
-@Serializable
-data class UserUsage(
-    val userId: Long,
-    val userName: String,
-    val tokens: Long,
-)
-
-@Serializable
-data class CompanyUsage(
-    val companyId: Long,
-    val totalTokens: Long,
-    val byUser: List<UserUsage>,
-)

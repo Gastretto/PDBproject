@@ -1,69 +1,65 @@
 package com.marlin.tokenrouter.server.postgres
 
-import com.marlin.tokenrouter.model.ApiKey
+import com.marlin.tokenrouter.model.ApiToken
 import com.marlin.tokenrouter.model.Company
 import com.marlin.tokenrouter.model.User
+import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 
 fun allCompanies(full: Boolean): List<Company> = transaction {
-    Companies.selectAll().map { row ->
-        val companyId = row[Companies.id]
-        toCompany(row[Companies.id], row[Companies.name], row[Companies.prefix],
-            row[Companies.tokenLimit], row[Companies.tokensSpent], companyId, full)
-    }
+    Companies.selectAll().map { row -> toCompany(row, full) }
 }
 
 fun findCompany(id: Long, full: Boolean): Company? = transaction {
-    Companies.selectAll().firstOrNull { it[Companies.id] == id }?.let { row ->
-        val companyId = row[Companies.id]
-        toCompany(companyId, row[Companies.name], row[Companies.prefix],
-            row[Companies.tokenLimit], row[Companies.tokensSpent], companyId, full)
-    }
+    Companies.selectAll()
+        .where { Companies.id eq id }
+        .singleOrNull()
+        ?.let { row -> toCompany(row, full) }
 }
 
-private fun toCompany(
-    id: Long,
-    name: String,
-    prefix: String,
-    tokenLimit: Long,
-    tokensSpent: Long,
-    companyId: Long,
-    full: Boolean,
-): Company {
+private fun toCompany(row: ResultRow, full: Boolean): Company {
+    val companyId = row[Companies.id]
+
     val users = if (full) {
         Users.selectAll()
-            .filter { it[Users.companyId] == companyId }
-            .map {
+            .where { Users.companyId eq companyId }
+            .map { user ->
                 User(
-                    id = it[Users.id],
+                    id = user[Users.id],
                     companyId = companyId,
-                    login = it[Users.login],
-                    name = it[Users.name],
+                    login = user[Users.login],
+                    name = user[Users.name],
                 )
             }
-    } else emptyList()
+    } else {
+        emptyList()
+    }
 
-    val keys = if (full) {
-        ApiKeys.selectAll()
-            .filter { it[ApiKeys.companyId] == companyId }
-            .map {
-                ApiKey(
-                    key = it[ApiKeys.key],
+    val apiTokens = if (full) {
+        ApiTokens.selectAll()
+            .where { ApiTokens.companyId eq companyId }
+            .map { token ->
+                ApiToken(
+                    id = token[ApiTokens.id],
                     companyId = companyId,
-                    userId = it[ApiKeys.userId],
-                    active = it[ApiKeys.active],
+                    userId = token[ApiTokens.userId],
+                    tokenPrefix = token[ApiTokens.tokenPrefix],
+                    revoked = token[ApiTokens.revokedAt] != null,
                 )
             }
-    } else emptyList()
+    } else {
+        emptyList()
+    }
 
     return Company(
-        id = id,
-        name = name,
-        prefix = prefix,
-        tokenLimit = tokenLimit,
-        tokensSpent = tokensSpent,
-        validApiKeys = keys,
-        validLogins = users,
+        id = companyId,
+        name = row[Companies.name],
+        prefix = row[Companies.prefix],
+        creditLimit = row[Companies.creditLimit].toDouble(),
+        creditSpend = row[Companies.creditSpend].toDouble(),
+        hasCredits = row[Companies.hasCredits],
+        apiTokens = apiTokens,
+        users = users,
     )
 }

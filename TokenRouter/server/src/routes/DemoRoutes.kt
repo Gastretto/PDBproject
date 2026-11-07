@@ -49,20 +49,6 @@ fun Routing.demoRoutes() {
         )
     }
 
-    get("/demo/influx/usage") {
-        val range = call.request.queryParameters["range"] ?: "-1h"
-        runCatching { Influx.usageSummary(range) }
-            .onSuccess { summary ->
-                call.respondText(
-                    json.encodeToString(summary),
-                    contentType = ContentType.Application.Json,
-                )
-            }
-            .onFailure { e ->
-                call.respondText("influx query failed: ${e.message}", status = HttpStatusCode.BadGateway)
-            }
-    }
-
     get("/demo/influx/ping") {
         val ok = Influx.ping()
         call.respondText(
@@ -73,13 +59,12 @@ fun Routing.demoRoutes() {
     }
 }
 
-private fun randomUsageEvent(): UsageEvent {
-    val userId = if (kotlin.random.Random.nextBoolean()) 1L else 2L
-    return UsageEvent(
-        companyId = 1,
-        userId = userId,
-        promptTokens = kotlin.random.Random.nextInt(50, 2000),
-        completionTokens = kotlin.random.Random.nextInt(50, 2000),
-        timestampMs = System.currentTimeMillis(),
-    )
-}
+private fun randomUsageEvent(): UsageEvent = UsageEvent(
+    companyId = 1,
+    apiTokenId = 1,
+    provider = "OPENAI",
+    model = "gpt-4o-mini",
+    inputTokens = kotlin.random.Random.nextLong(50, 2000),
+    outputTokens = kotlin.random.Random.nextLong(50, 2000),
+    timestampMs = System.currentTimeMillis(),
+)

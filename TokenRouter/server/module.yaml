@@ -8,6 +8,7 @@ dependencies:
   - $kotlin.serialization.json
   - $libs.exposed.core
   - $libs.exposed.jdbc
+  - $libs.exposed.java.time
   - $libs.postgresql
   - $libs.hikaricp
   - $libs.flyway.core

@@ -8,5 +8,4 @@ data class User(
     val companyId: Long,
     val login: String,
     val name: String,
-    val pwdHash:String
 )

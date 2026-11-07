@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/TokenRouter.iml" filepath="$PROJECT_DIR$/TokenRouter.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/TokenRouter.iosApp.iml" filepath="$PROJECT_DIR$/.idea/TokenRouter.iosApp.iml" />
     </modules>
   </component>
 </project>

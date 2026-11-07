@@ -5,8 +5,8 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class LimitStatus(
     val companyId: Long,
-    val tokensSpent: Long,
-    val tokenLimit: Long,
-    val remaining: Long,
-    val hasCredit: Boolean,
+    val creditLimit: Double,
+    val creditSpend: Double,
+    val remaining: Double,
+    val hasCredits: Boolean,
 )

@@ -144,13 +144,14 @@ private fun CompanyCard(company: Company, onClick: () -> Unit) {
 
 @Composable
 private fun UsageBar(company: Company) {
-    val fraction = if (company.tokenLimit > 0) {
-        (company.tokensSpent.toFloat() / company.tokenLimit).coerceIn(0f, 1f)
+    val debt = (-company.creditSpend).coerceAtLeast(0.0)
+    val fraction = if (company.creditLimit > 0) {
+        (debt / company.creditLimit).toFloat().coerceIn(0f, 1f)
     } else 0f
 
     Column {
         Text(
-            text = "${company.tokensSpent} / ${company.tokenLimit} tokens",
+            text = "balance ${company.creditSpend} · debt limit ${company.creditLimit}",
             style = MaterialTheme.typography.bodySmall,
         )
         Spacer(modifier = Modifier.height(4.dp))
@@ -229,27 +230,27 @@ private fun CompanyDetail(company: Company) {
         }
 
         item {
-            SectionTitle("API keys (${company.validApiKeys.size})")
-            if (company.validApiKeys.isEmpty()) {
-                EmptyHint("No API keys")
+            SectionTitle("API tokens (${company.apiTokens.size})")
+            if (company.apiTokens.isEmpty()) {
+                EmptyHint("No API tokens")
             }
         }
 
-        items(company.validApiKeys) { apiKey ->
+        items(company.apiTokens) { apiToken ->
             Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text(
-                        text = apiKey.key,
+                        text = apiToken.tokenPrefix,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium,
                     )
                     Text(
-                        text = if (apiKey.active) "active · user #${apiKey.userId}" else "revoked",
+                        text = if (apiToken.revoked) "revoked" else "active · user #${apiToken.userId}",
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (apiKey.active) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
+                        color = if (apiToken.revoked) {
                             MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
                         },
                     )
                 }
@@ -257,13 +258,13 @@ private fun CompanyDetail(company: Company) {
         }
 
         item {
-            SectionTitle("Users (${company.validLogins.size})")
-            if (company.validLogins.isEmpty()) {
+            SectionTitle("Users (${company.users.size})")
+            if (company.users.isEmpty()) {
                 EmptyHint("No users")
             }
         }
 
-        items(company.validLogins) { user ->
+        items(company.users) { user ->
             Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text(
